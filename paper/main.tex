@@ -33,7 +33,8 @@
 Most transformer MLPs still use ReLU, GELU or SiLU, even though the three perform almost identically and are beaten by both gated MLPs like SwiGLU and by squared ReLU.
 SwiGLU pays for its gain with a third weight matrix.
 I test whether the same gains are available without it, using four new activations: Group Gate, Rank-ReLU$^2$, Smooth-back ReLU$^2$ and Cross-Square.
-Each is compared with ReLU, GELU, SiLU, squared ReLU and SwiGLU in small Llama-style models trained on TinyStories on a MacBook, at matched parameter counts, with a learning-rate sweep per activation and three seeds.
+Each is compared with ReLU, GELU, SiLU, squared ReLU and SwiGLU in 23M-parameter Llama-style models trained on TinyStories on a MacBook, at matched parameter counts, with a learning-rate sweep per activation and three seeds.
+The best of the four is then rerun against SwiGLU at about 520M parameters on a TPU.
 \todo{Main result, with a number.}
 \todo{What it means, in one sentence.}
 \end{abstract}
@@ -57,7 +58,10 @@ The catch with SwiGLU is cost.
 Its gate needs a whole extra weight matrix, so to keep the parameter count fixed the hidden layer has to shrink from $4d$ to about $\tfrac{8}{3}d$.
 This paper asks a narrow question: can an activation get the benefit of gating, squaring or both while keeping the plain two-matrix MLP at full width?
 
-I propose four activations that try (Section~\ref{sec:method}) and test them against five baselines under the same budget (Section~\ref{sec:setup}).
+I propose four activations that try (Section~\ref{sec:method}).
+The experiments have two stages (Section~\ref{sec:setup}).
+First, all four go up against five baselines in a full sweep of small models on a laptop.
+Then whichever does best is trained against SwiGLU at roughly 20 times the size, which is the comparison that actually matters if the idea is to be useful.
 \todo{One or two sentences on what was found.}
 Code, run logs and a short pilot study are at \url{https://github.com/navthings/lilact}.
 
@@ -190,23 +194,27 @@ The risk is that the two halves learn to copy each other and waste half the laye
 \section{Experimental setup}
 \label{sec:setup}
 
-\paragraph{Models.}
-Decoder-only Llama-style transformers: pre-norm RMSNorm, rotary position embeddings, no biases, tied input and output embeddings, context length 512.
-The small model has $d = 384$, 6 layers and 6 heads (22.9M parameters); the larger has $d = 768$, 12 layers and 12 heads (about 110M).
-Only the MLP activation changes between runs, and every model is within about 1\% of the same parameter count (Appendix~\ref{app:hparams}).
+All models are decoder-only Llama-style transformers: pre-norm RMSNorm, rotary position embeddings, no biases and tied input and output embeddings.
+Only the MLP activation changes between runs.
+Both stages use AdamW \citep{loshchilov2019adamw} with $\beta = (0.9, 0.95)$, weight decay 0.1 on weight matrices only (never on norms or on the activations' own parameters) and gradient clipping at 1.0.
 
-\paragraph{Data.}
-TinyStories \citep{eldan2023tinystories}, tokenised with the 32k-token Llama tokenizer.
-The small model trains on 100M tokens and the larger on 300M.
+\paragraph{Stage 1: the full sweep.}
+The model has $d = 384$, 6 layers, 6 heads and a context of 512 tokens, for 22.9M parameters, and every activation stays within about 1\% of that count (Appendix~\ref{app:hparams}).
+The data is TinyStories \citep{eldan2023tinystories}, tokenised with the 32k-token Llama tokenizer into 514M training and 5.2M validation tokens.
+Each run trains on 25M tokens, under 5\% of the training set, in steps of 16,384 tokens, with linear warmup over the first 2\% of steps and cosine decay to 10\% of the peak learning rate.
 Training windows are drawn in a shuffled order without replacement, so no token is seen twice.
-This matters: a first pilot on Tiny Shakespeare \citep{karpathy2015charrnn} repeated its data about 16 times, the models memorised it, and the activations that fit fastest looked worst (Appendix~\ref{app:pilot}).
+That matters: a first pilot on Tiny Shakespeare \citep{karpathy2015charrnn} repeated its data about 16 times, the models memorised it, and the activations that fit fastest looked worst (Appendix~\ref{app:pilot}).
 
-\paragraph{Training.}
-AdamW \citep{loshchilov2019adamw} with $\beta = (0.9, 0.95)$, weight decay 0.1 on weight matrices only (never on norms or on the activations' own parameters), gradient clipping at 1.0, linear warmup over the first 2\% of steps and cosine decay to 10\% of the peak learning rate.
-Each step sees 16,384 tokens for the small model and 32,768 for the larger, using gradient accumulation.
-For every activation I try peak learning rates of $5\times10^{-4}$, $10^{-3}$ and $2\times10^{-3}$ with seed 0, then run seeds 1 and 2 at the best one.
-Everything runs in MLX \citep{hannun2023mlx} on a 16GB MacBook Air (M5).
+For every activation I try peak learning rates of $5\times10^{-4}$, $10^{-3}$ and $2\times10^{-3}$ with seed 0, then run seeds 1 and 2 at the best one, plus six ablation runs: 51 runs in all.
+Everything runs in MLX \citep{hannun2023mlx} on a 16GB MacBook Air (M5) at about 9,600 tokens per second, so a run takes about 45 minutes and the whole sweep about two days.
 The laptop has no fan and slows down as it heats up, so throughput is compared only between runs started from cold.
+
+\paragraph{Stage 2: scaling up the winner.}
+The candidate with the lowest mean validation loss in stage 1 is trained against SwiGLU at about 520M parameters: $d = 1280$, 28 layers, 20 query heads and 4 key-value heads (grouped-query attention), and a context of 1024 tokens.
+This is the configuration of sprout, a model I trained earlier with SwiGLU,\footnote{\url{https://github.com/navthings/sprout}} so the training code and settings are already tested at this size.
+TinyStories is too small and too simple at this size, so both models train on 2.5B tokens of FineWeb-Edu \citep{penedo2024fineweb} with the same data order and initial weights, on a Kaggle TPU v5e-8 in JAX \citep{jax2018github}, which takes roughly 5 to 6 hours per model.
+Both use sprout's schedule: peak learning rate $3\times10^{-4}$ with 1,500 warmup steps, held flat, then decayed linearly to 10\% over the last 15\% of training.
+TPU time is limited to 20 hours a week, so stage 2 uses one seed per model and keeps that learning rate rather than sweeping it.
 
 \paragraph{What I measure.}
 Best and final validation loss (mean $\pm$ standard deviation over seeds), training throughput, the share of hidden units that never fire on a held-out batch, the share of exact zeros, the largest activation in each layer, and where each activation's learned parameters end up.
@@ -217,12 +225,12 @@ Best and final validation loss (mean $\pm$ standard deviation over seeds), train
 \todo{One paragraph: the headline result in numbers, then what the table and figure show.}
 
 \begin{table}
-  \caption{Best validation loss, mean $\pm$ std over 3 seeds (lower is better). \todo{one-line takeaway}}
+  \caption{Stage 1: best validation loss at 22.9M parameters, mean $\pm$ std over 3 seeds (lower is better). \todo{one-line takeaway}}
   \label{tab:main}
   \centering
   \begin{tabular}{lcc}
     \toprule
-    Activation & 22.9M & 110M \\
+    Activation & Best lr & Val loss \\
     \midrule
     ReLU & \todo{} & \todo{} \\
     GELU & \todo{} & \todo{} \\
@@ -241,9 +249,23 @@ Best and final validation loss (mean $\pm$ standard deviation over seeds), train
 \begin{figure}
   \centering
   \fbox{\rule[-.5cm]{0cm}{4cm} \rule[-.5cm]{4cm}{0cm}}
-  \caption{Validation loss over training for every activation, small model, seed 0 at its best learning rate. \todo{one-line takeaway}}
+  \caption{Stage 1: validation loss over training for every activation, seed 0 at its best learning rate. \todo{one-line takeaway}}
   \label{fig:curves}
 \end{figure}
+
+\begin{table}
+  \caption{Stage 2: the stage-1 winner against SwiGLU at about 520M parameters, one seed each. \todo{one-line takeaway}}
+  \label{tab:scale}
+  \centering
+  \begin{tabular}{lccc}
+    \toprule
+    Activation & Params & FineWeb-Edu val loss & Tokens/s \\
+    \midrule
+    SwiGLU & \todo{} & \todo{} & \todo{} \\
+    \todo{winner} & \todo{} & \todo{} & \todo{} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
 
 \section{Analysis}
 \label{sec:analysis}
@@ -263,9 +285,10 @@ Best and final validation loss (mean $\pm$ standard deviation over seeds), train
 \section{Limitations}
 \label{sec:limitations}
 
-This is a laptop-sized study.
-The largest model has about 110M parameters, and rankings between activations are known to shift with scale and setup \citep{narang2021transfer}.
-There is one dataset, TinyStories, which is simple English and may favour some functions over others.
+Most of this study is laptop-sized.
+All nine activations are compared only at 23M parameters, and rankings between activations are known to shift with scale and setup \citep{narang2021transfer}.
+Stage 2 checks one candidate at about 520M, but with one seed and a borrowed learning rate, so a small gap there could be noise.
+Stage 1 uses one dataset, TinyStories, which is simple English and may favour some functions over others.
 Only the peak learning rate is tuned, and three seeds can only separate differences larger than about \todo{two standard deviations}.
 Throughput numbers come from plain MLX code with no fused kernels, which probably understates how cheap Group Gate and Rank-ReLU$^2$ could be.
 
@@ -288,7 +311,7 @@ Throughput numbers come from plain MLX code with no fused kernels, which probabl
   \centering
   \begin{tabular}{lcc}
     \toprule
-    Activation & small & large \\
+    Activation & Stage 1 & Stage 2 \\
     \midrule
     \todo{fill from the run logs} & & \\
     \bottomrule

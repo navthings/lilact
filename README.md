@@ -65,6 +65,14 @@ If training is slow and `sysctl vm.swapusage` shows swap filling up, the 32k-voc
 
 On a fanless MacBook Air the full `s20` grid (45 runs) is days of compute, and the chip throttles once it heats up, so tokens/s numbers are only comparable between runs started cold. `s100` is better on cloud hardware.
 
+## Stage 2: scaling up on a TPU
+
+`tpu/scaleup_tpu_kaggle.ipynb` trains the stage-1 winner against SwiGLU at ~520M params (sprout's config: d=1280, 28 layers, 20/4 heads) on 2.5B FineWeb-Edu tokens, on a Kaggle TPU v5e-8. It's sprout's training code with the activation swapped in, so it keeps ZeRO-1 sharding, resuming across sessions and the HBM-overflow fallback.
+
+Make two copies on Kaggle, set `ACT` in the config cell (`"swiglu"` in one, the winner in the other), and run both. Each takes ~5-6h, so one session each, about 11h of the 20h weekly TPU quota. The output has `result_<act>.json` with the numbers for the paper's stage-2 table.
+
+`tpu/scaleup.py` is the same notebook as a plain script.
+
 ## Layout
 
 ```
@@ -77,5 +85,6 @@ sweep.py             lr sweep, seeds, ablations
 analyze.py           tables and plots
 test_activations.py  worked examples, gradient checks, param counts
 pilot/               first char-level pilot on Tiny Shakespeare
+tpu/                 stage-2 kaggle notebook (jax, tpu v5e-8)
 paper/               LaTeX source (NeurIPS 2026 template, preprint mode)
 ```

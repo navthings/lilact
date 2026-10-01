@@ -1,0 +1,6 @@
+jax[tpu]
+datasets==5.0.1
+transformers
+safetensors
+psutil
+matplotlib
