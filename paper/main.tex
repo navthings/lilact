@@ -14,9 +14,8 @@
 \usepackage{xcolor}
 \usepackage{graphicx}
 
-% red placeholders, delete this line's uses before submitting
+% red placeholders, all of them should be gone before posting
 \newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
-\newcommand{\relusq}{\mathrm{ReLU}^2}
 
 \title{Group Gate, Cross-Square and Squared Surrogates: New Activations for Small Transformers}
 
@@ -31,158 +30,154 @@
 \maketitle
 
 \begin{abstract}
-ReLU, GELU and SiLU remain the default activation functions in transformer language models, yet published comparisons show they are nearly interchangeable and are consistently beaten by gated and squared alternatives.
-We propose four activation functions that combine these ingredients in ways not previously studied:
-Group Gate, a gate tied to the up-projection through a small learned block-diagonal mixing matrix;
-Rank-ReLU$^2$, a squared activation with a learned per-token statistical threshold;
-Smooth-back ReLU$^2$, which keeps the exact zeros of squared ReLU while passing a smooth surrogate gradient to negative inputs;
-and Cross-Square, which pairs hidden units so that each squared unit is gated by its partner at no extra parameter cost.
-We train \todo{N} decoder-only transformers at \todo{two} scales with matched parameter counts, per-activation learning-rate sweeps and three seeds, and compare against ReLU, GELU, SiLU, squared ReLU and SwiGLU.
+Most transformer MLPs still use ReLU, GELU or SiLU, even though the three perform almost identically and are beaten by both gated MLPs like SwiGLU and by squared ReLU.
+SwiGLU pays for its gain with a third weight matrix.
+I test whether the same gains are available without it, using four new activations: Group Gate, Rank-ReLU$^2$, Smooth-back ReLU$^2$ and Cross-Square.
+Each is compared with ReLU, GELU, SiLU, squared ReLU and SwiGLU in small Llama-style models trained on TinyStories on a MacBook, at matched parameter counts, with a learning-rate sweep per activation and three seeds.
 \todo{Main result, with a number.}
-\todo{One sentence on what it means.}
+\todo{What it means, in one sentence.}
 \end{abstract}
 
 \section{Introduction}
 \label{sec:intro}
 
-Every MLP block in a transformer applies one elementwise nonlinearity between two linear projections, and that function is the only place the block can bend.
-Three choices dominate: ReLU \citep{nair2010relu}, GELU \citep{hendrycks2016gelu} and SiLU, also called Swish \citep{elfwing2018silu,ramachandran2017swish}.
-In the controlled comparison of \citet{shazeer2020glu}, their final log-perplexities were 1.677, 1.679 and 1.683, close enough that the choice between them barely matters.
+The activation function is the only nonlinear step in a transformer's MLP block.
+It is also one of the least tested choices in a typical model: most people copy whatever Llama uses, and my own earlier models used SwiGLU for exactly that reason.
 
-Two other ideas do matter.
-The first is gating: multiplying two projections of the input, as in gated linear units \citep{dauphin2017glu,shazeer2020glu}.
-In that same study, a bilinear layer with no nonlinearity at all beat all three defaults, and its SwiGLU variant is now standard in Llama-style models \citep{touvron2023llama}.
-The second is a squared positive side.
-Squared ReLU matched SwiGLU at 1.3B parameters \citep{zhang2024relu2} and was the most effective single change found by the Primer architecture search \citep{so2021primer}, while learned activations with squared terms have beaten SwiGLU at 1B to 3B parameters \citep{huang2024xielu,zhuo2024polycom}.
-A third, smaller effect is letting gradient reach negative inputs \citep{huang2024xielu,huang2024xatlu}.
+The three classic options barely differ.
+In \citet{shazeer2020glu}'s comparison, ReLU \citep{nair2010relu}, GELU \citep{hendrycks2016gelu} and SiLU \citep{elfwing2018silu,ramachandran2017swish} finished at log-perplexities of 1.677, 1.679 and 1.683.
+What did make a difference in that study was multiplying two projections of the input together.
+A bilinear layer, which does only that and has no nonlinearity at all, beat all three, and SwiGLU did better still.
+So the part of the MLP that bends seems to matter less than the part that multiplies.
 
-These ingredients have mostly been studied one at a time, and the best-known way to get gating, SwiGLU, needs a third weight matrix, which forces the hidden layer to shrink by a third to keep the parameter count fixed.
-This paper asks whether combining the ingredients, without that extra matrix, gives activation functions that beat the defaults.
+Squaring is the other change that keeps winning.
+Squared ReLU was the most useful single change found by the Primer search \citep{so2021primer}, matched SwiGLU at 1.3B parameters \citep{zhang2024relu2}, and learned activations with an $x^2$ term have beaten SwiGLU at 1B to 3B \citep{huang2024xielu,zhuo2024polycom}.
 
-Our contributions are:
-\begin{itemize}
-  \item Four activation functions, Group Gate, Rank-ReLU$^2$, Smooth-back ReLU$^2$ and Cross-Square (Section~\ref{sec:method}), each built from at least two of the ingredients above. Group Gate starts training as exactly SiLU, and Smooth-back ReLU$^2$ computes exactly squared ReLU in the forward pass.
-  \item A comparison against ReLU, GELU, SiLU, squared ReLU and SwiGLU at \todo{two} model sizes, with matched parameter counts, per-activation learning-rate sweeps and three seeds (Section~\ref{sec:setup}).
-  \item \todo{Main finding.}
-  \item Code and training logs at \url{https://github.com/navthings/lilact}.
-\end{itemize}
+The catch with SwiGLU is cost.
+Its gate needs a whole extra weight matrix, so to keep the parameter count fixed the hidden layer has to shrink from $4d$ to about $\tfrac{8}{3}d$.
+This paper asks a narrow question: can an activation get the benefit of gating, squaring or both while keeping the plain two-matrix MLP at full width?
+
+I propose four activations that try (Section~\ref{sec:method}) and test them against five baselines under the same budget (Section~\ref{sec:setup}).
+\todo{One or two sentences on what was found.}
+Code, run logs and a short pilot study are at \url{https://github.com/navthings/lilact}.
 
 \section{Background and related work}
 \label{sec:related}
 
-\paragraph{Default activations.}
-ReLU, $\max(0,x)$, is cheap and produces exact zeros, but a unit whose input is negative for every example receives no gradient and stops learning.
-GELU, $x\,\Phi(x)$, and SiLU, $x\,\sigma(x)$, are smooth and pass a small gradient for negative inputs; GELU is close to $x\,\sigma(1.702x)$, so the two are nearly the same function.
-
 \paragraph{Gated MLPs.}
-Gated linear units multiply two projections of the input \citep{dauphin2017glu}.
-\citet{shazeer2020glu} compared GLU variants in T5 and found that every gated variant beat ReLU, GELU and Swish at equal parameter count, with hidden width reduced from 3072 to 2048 to pay for the third matrix.
-\citet{lyu2026glu} explain the gain through optimisation: the neural tangent kernel of a GLU network is approximately that of its non-gated counterpart multiplied elementwise by the data Gram matrix, which lowers its condition number.
-When \citet{narang2021transfer} re-tested many published transformer modifications in one codebase, GLU variants were among the few whose gains held.
-Two designs are close to ours.
-Masked GLU shares one weight matrix between gate and value, split by learned binary masks \citep{tajima2025mglu}.
-The RWKV channel-mixing block computes $\sigma(r) \odot W_v \max(k,0)^2$ from separate projections $r$ and $k$ of token-shifted inputs \citep{peng2023rwkv}.
-Group Gate and Cross-Square differ from both by deriving the gate from the same projection as the value, through learned mixing (Group Gate) or a fixed symmetric pairing (Cross-Square).
+Gated linear units multiply two linear projections of the input, one of them passed through a nonlinearity \citep{dauphin2017glu}.
+\citet{shazeer2020glu} found that every gated variant they tried beat ReLU, GELU and Swish in T5, with the hidden width cut from 3072 to 2048 to pay for the third matrix.
+When \citet{narang2021transfer} later re-tested dozens of published transformer changes in one codebase, most gains vanished, but the GLU variants held up.
+\citet{lyu2026glu} give an optimisation explanation: a GLU network's neural tangent kernel is roughly the plain network's kernel multiplied elementwise by the data Gram matrix, which improves its conditioning.
 
-\paragraph{Squared and polynomial activations.}
-Squared ReLU was found by the Primer search \citep{so2021primer} and gave the best trade-off between quality and activation sparsity among ReLU, SwiGLU, ReGLU and squared ReLU at 1B scale \citep{zhang2024relu2}.
-PolyCom learns a polynomial of ReLU (PolyReLU) or of normalised powers of the input (PolyNorm), and PolyNorm beat SwiGLU at 1B parameters \citep{zhuo2024polycom}.
-xIELU adds a learned $x^2$ term on the positive side and an ELU-shaped negative side, and beat both squared ReLU and SwiGLU at 1.1B and 3B parameters \citep{huang2024xielu}.
+Two existing designs are close to what I do here.
+Masked GLU uses one weight matrix for both gate and value and splits it with learned binary masks \citep{tajima2025mglu}.
+RWKV's channel-mixing block computes $\sigma(r) \odot W_v \max(k,0)^2$, so it already combines a sigmoid gate with a squared value, but $r$ and $k$ come from separate matrices applied to token-shifted inputs \citep{peng2023rwkv}.
+Group Gate and Cross-Square instead take the gate from the same projection as the value.
 
-\paragraph{Gradients for inactive units.}
-xATLU widens the range of the gating function so that negative inputs pass gradient, and attributes its gain over GELU to this \citep{huang2024xatlu}.
-Replacing the backward pass of a non-differentiable or flat function with a smooth surrogate is standard in quantised networks \citep{bengio2013ste} and spiking networks \citep{neftci2019surrogate}.
-SUGAR applies this to ReLU, keeping ReLU in the forward pass and a smooth surrogate gradient in the backward pass, and reports large gains for VGG-16 and ResNet-18 on CIFAR-100 \citep{horuz2025sugar}; it was evaluated on vision tasks only.
-Smooth-back ReLU$^2$ applies the same idea to squared ReLU in language models.
+\paragraph{Squared activations.}
+Besides Primer and the ReLU$^2$ study above, PolyCom learns a weighted sum of powers of ReLU or of normalised powers of the input \citep{zhuo2024polycom}, and xIELU adds a learned $x^2$ term on the positive side with an ELU-shaped negative side \citep{huang2024xielu}.
+Both beat SwiGLU at 1B scale or above.
 
-\paragraph{Activation sparsity and coupled units.}
-Spark Transformer selects roughly the top-$k$ FFN units per token with a threshold estimated from the mean and standard deviation of the pre-activations, keeping 8\% of units active with near-neutral quality \citep{you2025spark}; its aim is efficiency, and the threshold is hard.
-SoLU, $x \cdot \mathrm{softmax}(x)$, couples units for interpretability and needs a LayerNorm after it to match GELU \citep{elhage2022solu}.
-Squeeze-and-excitation gates channels from pooled statistics in vision models \citep{hu2018se}.
-Rank-ReLU$^2$ uses a soft, learned statistical threshold to improve quality rather than speed.
+\paragraph{Gradient for negative inputs.}
+A ReLU unit whose input is negative on every example gets no gradient and stops learning.
+xATLU widens the range of its gate so that negative inputs still pass gradient, and credits much of its gain over GELU to that \citep{huang2024xatlu}.
+Swapping a flat or non-differentiable backward pass for a smooth stand-in is routine in quantised networks \citep{bengio2013ste} and spiking networks \citep{neftci2019surrogate}.
+SUGAR does this for plain ReLU and reports large gains on CIFAR-100 with VGG-16 and ResNet-18 \citep{horuz2025sugar}, but it was only tested on vision models.
 
-\paragraph{Token mixing inside the MLP.}
-Short causal convolutions placed inside the MLP before the activation (Canon-D) improve reasoning depth in synthetic tasks \citep{allenzhu2025canon}.
-We deliberately exclude token mixing: every function studied here acts on a single token, so differences come from the activation alone.
+\paragraph{Units that depend on each other.}
+Spark Transformer keeps roughly the top-$k$ FFN units per token, using a threshold estimated from the mean and standard deviation of the pre-activations; it keeps 8\% of units active at about the same quality as Gemma-2, and its goal is speed \citep{you2025spark}.
+SoLU, $x \cdot \mathrm{softmax}(x)$, also makes units compete, for interpretability, and needs a LayerNorm after it to match GELU \citep{elhage2022solu}.
+
+\paragraph{What I leave out.}
+Short causal convolutions inside the MLP (Canon-D) help reasoning in synthetic tasks \citep{allenzhu2025canon}, and RWKV mixes in the previous token too.
+Every function in this paper looks at one token only, so any difference comes from the activation and not from extra token mixing.
 
 \section{Method}
 \label{sec:method}
 
-For one token with hidden state $x \in \mathbb{R}^{d}$, a standard MLP block computes
+For one token with hidden state $x \in \mathbb{R}^{d}$, the standard MLP block is
 \begin{equation}
   \label{eq:mlp}
   \mathrm{MLP}(x) = W_{\text{down}}\, f(h), \qquad h = W_{\text{up}}\, x, \qquad W_{\text{up}} \in \mathbb{R}^{d_{ff} \times d},
 \end{equation}
 with $d_{ff} = 4d$.
-SwiGLU replaces this with $W_{\text{down}}\big(\mathrm{SiLU}(W x) \odot V x\big)$ and uses $d_{ff} \approx \tfrac{8}{3}d$ so that its three matrices hold the same number of parameters as two matrices at $4d$ \citep{shazeer2020glu}.
-All four proposed functions use the two-matrix form with $d_{ff} = 4d$.
-Throughout, $\sigma(z) = 1/(1+e^{-z})$ and $\odot$ is elementwise multiplication.
+SwiGLU uses $W_{\text{down}}\big(\mathrm{SiLU}(W x) \odot V x\big)$ with $d_{ff} \approx \tfrac{8}{3}d$, so its three matrices hold as many parameters as two at $4d$ \citep{shazeer2020glu}.
+All four new activations keep the two-matrix form at $d_{ff} = 4d$.
+$\sigma$ is the sigmoid and $\odot$ is elementwise multiplication.
 
 \subsection{Group Gate}
 
-Split the $d_{ff}$ hidden units into groups of size $g$ and let $A$ be block-diagonal with one learned $g \times g$ block per group.
-Each unit is gated by a learned mix of the units in its group:
+Split the $d_{ff}$ hidden units into groups of $g$, and give each group its own learned $g \times g$ matrix.
+Stacked, these form a block-diagonal matrix $A$.
+Each unit's gate is a learned mix of the units in its group:
 \begin{equation}
   \label{eq:groupgate}
   f(h)_i = h_i \cdot \sigma\Big(\sum_{j \in G(i)} A_{ij}\, h_j\Big), \qquad A_{\text{init}} = I.
 \end{equation}
-At initialisation $A = I$ and Group Gate is exactly SiLU.
-Because $h = W_{\text{up}} x$, the gate's pre-activation is $(A W_{\text{up}})\, x$, so Group Gate is a gated MLP whose gate matrix is constrained to $V = A W_{\text{up}}$.
-With $g = 2$ and $A$ a swap matrix, each unit is gated by one partner; as $g$ grows the gate can use more directions of $x$, approaching an unconstrained gate.
-The extra parameters are $d_{ff}\, g$ per layer, and the extra compute is about $2\, d_{ff}\, g$ FLOPs per token, a fraction $g/(2d)$ of the block's matrix multiplies.
-We implement $A$ as a tensor of shape $(d_{ff}/g, g, g)$ applied with one batched matrix multiply.
+At initialisation every unit only looks at itself, so Group Gate starts out as exactly SiLU and training decides how much the units should listen to each other.
+
+Since $h = W_{\text{up}} x$, the gate's input is $(A W_{\text{up}})\, x$.
+That makes Group Gate a gated MLP whose gate matrix is forced to be $A W_{\text{up}}$ rather than a free third matrix.
+With $g = 2$ and $A$ a swap matrix, each unit is gated by one partner; a larger $g$ lets the gate look in more directions.
+The cost is $d_{ff}\, g$ extra parameters per layer and about $2\, d_{ff}\, g$ extra FLOPs per token, a fraction $g/(2d)$ of the block's matrix multiplies, or about 1\% at $d = 384$, $g = 8$.
+$A$ is stored as a $(d_{ff}/g, g, g)$ tensor and applied with one batched matrix multiply.
 
 \subsection{\texorpdfstring{Rank-ReLU$^2$}{Rank-ReLU2}}
 
-Let $\mu$ be the mean of the $d_{ff}$ pre-activations of one token and $s = \sqrt{\mathrm{Var}(h) + \epsilon}$ their standard deviation.
-A unit passes only if it is more than $\tau$ standard deviations above the token's mean, and passing units are squared:
+Squared ReLU switches a unit on whenever its input is above zero, so how many units are active depends on the scale of the layer and drifts during training.
+Rank-ReLU$^2$ switches a unit on only when it stands out from the other units for the same token.
+Let $\mu$ be the mean of the token's $d_{ff}$ pre-activations and $s = \sqrt{\mathrm{Var}(h) + \epsilon}$ their standard deviation, with $\epsilon = 10^{-5}$.
+Then
 \begin{equation}
   \label{eq:rank}
   f(h_i) = \frac{\max\big(0,\; h_i - \mu - \tau s\big)^2}{s},
 \end{equation}
-with $\tau$ a learned scalar per layer, initialised at \todo{0}, and $\epsilon = 10^{-5}$.
-If pre-activations are roughly Gaussian, the expected fraction of active units is $1 - \Phi(\tau)$: about 50\% at $\tau = 0$, 16\% at $\tau = 1$ and 7\% at $\tau = 1.5$.
-For $c > 0$, $f(c\,h) = c\, f(h)$, so unlike squared ReLU the output grows linearly, not quadratically, with the scale of its input.
-We also test a variant that stops the gradient through $\mu$ and $s$.
+where $\tau$ is learned, one per layer, starting at 0.
+If the pre-activations are roughly Gaussian, the share of active units is $1 - \Phi(\tau)$: about 50\% at $\tau = 0$, 16\% at $\tau = 1$ and 7\% at $\tau = 1.5$.
+Dividing by $s$ means that for $c > 0$, $f(c\,h) = c\, f(h)$, so the output grows linearly with the input's scale instead of quadratically as squared ReLU does.
+I also test a version that stops the gradient through $\mu$ and $s$.
 
 \subsection{\texorpdfstring{Smooth-back ReLU$^2$}{Smooth-back ReLU2}}
 
-The forward pass is squared ReLU, $y = \max(0,x)^2$, whose true derivative $2\max(0,x)$ is zero for every negative input.
-In the backward pass we replace it with the derivative of a smooth stand-in, $\mathrm{softplus}_\beta(x)^2$:
+The forward pass is plain squared ReLU, $y = \max(0,x)^2$.
+Its true derivative, $2\max(0,x)$, is zero for every negative input, so a unit that goes negative on everything never recovers.
+In the backward pass I replace it with the derivative of a smooth lookalike, $\mathrm{softplus}_\beta(x)^2$:
 \begin{equation}
   \label{eq:smooth}
   \frac{\partial y}{\partial x} := 2\, \mathrm{softplus}_\beta(x)\, \sigma(\beta x), \qquad \mathrm{softplus}_\beta(x) = \tfrac{1}{\beta} \ln\big(1 + e^{\beta x}\big).
 \end{equation}
-As $\beta \to \infty$ this recovers the true derivative.
-For finite $\beta$, negative inputs receive a small gradient (0.17 at $x = -1$ for $\beta = 1$) while positive inputs receive close to the true value (3.75 against 4 at $x = 2$).
-The forward pass keeps the exact zeros of squared ReLU.
-$\beta$ is a fixed hyperparameter; we use $\beta = $ \todo{1.5 or 2} and ablate it.
-The surrogate is implemented as a custom vector-Jacobian product.
+With $\beta = 1$, an input of $-1$ now gets a gradient of 0.17 instead of 0, and an input of 2 gets 3.75 instead of the true 4.
+As $\beta \to \infty$ the true derivative comes back.
+The forward pass still produces exact zeros, which is what makes squared ReLU sparse and cheap.
+I use $\beta = 1.5$ and test 1 and 4 as ablations.
+It is implemented as a custom vector-Jacobian product, about ten lines in MLX.
 
 \subsection{Cross-Square}
 
-Split $h$ into two halves $u, v \in \mathbb{R}^{d_{ff}/2}$ and pair unit $k$ of $u$ with unit $k$ of $v$.
-Each unit's squared value is gated by its partner:
+Split $h$ into halves $u, v \in \mathbb{R}^{d_{ff}/2}$ and pair unit $k$ of $u$ with unit $k$ of $v$.
+Each unit is squared and then gated by its partner:
 \begin{equation}
   \label{eq:cross}
   f(h) = \Big[\; \max(0,u)^2 \odot \sigma(v) \;\Big\Vert\; \max(0,v)^2 \odot \sigma(u) \;\Big],
 \end{equation}
-where $\Vert$ is concatenation, so the output has width $d_{ff}$.
-This combines the squared value of RWKV's channel mixing with a gate taken from the same projection, so it adds no parameters and keeps the full hidden width.
+where $\Vert$ is concatenation, so the output keeps width $d_{ff}$.
+This is RWKV's squared-and-gated recipe with the gate taken from the same projection, so it adds no parameters.
+The risk is that the two halves learn to copy each other and waste half the layer; Section~\ref{sec:analysis} compares it with an untied version that uses a separate gate matrix.
 
 \begin{table}
-  \caption{All activations compared. ``Gated'' means two projections are multiplied; ``squared'' means a squared positive side. Extra parameters are per layer.}
+  \caption{The nine activations. ``Gated'' means two projections are multiplied; ``squared'' means a squared positive side.}
   \label{tab:activations}
   \centering
   \begin{tabular}{llccll}
     \toprule
-    Activation & $f$ & Gated & Squared & Extra params & $d_{ff}$ \\
+    Activation & $f$ & Gated & Squared & Extra params per layer & $d_{ff}$ \\
     \midrule
     ReLU & $\max(0,h)$ & & & 0 & $4d$ \\
     GELU & $h\,\Phi(h)$ & & & 0 & $4d$ \\
     SiLU & $h\,\sigma(h)$ & & & 0 & $4d$ \\
     ReLU$^2$ & $\max(0,h)^2$ & & \checkmark & 0 & $4d$ \\
-    SwiGLU & $\mathrm{SiLU}(Wx) \odot Vx$ & \checkmark & & third matrix & $\tfrac{8}{3}d$ \\
+    SwiGLU & $\mathrm{SiLU}(Wx) \odot Vx$ & \checkmark & & 0 (width cut) & $\tfrac{8}{3}d$ \\
     \midrule
     Group Gate & Eq.~\eqref{eq:groupgate} & \checkmark & & $d_{ff}\, g$ & $4d$ \\
     Rank-ReLU$^2$ & Eq.~\eqref{eq:rank} & & \checkmark & 1 & $4d$ \\
@@ -195,24 +190,26 @@ This combines the squared value of RWKV's channel mixing with a gate taken from 
 \section{Experimental setup}
 \label{sec:setup}
 
-\paragraph{Model.}
-Decoder-only Llama-style transformers with pre-norm RMSNorm, rotary position embeddings, no biases and tied input and output embeddings.
-Only the MLP activation changes between runs.
-Sizes: \todo{about 20M and 100M parameters; give layers, $d$, heads, context length for each}.
-Table~\ref{tab:params} in Appendix~\ref{app:hparams} lists the exact parameter count of every model.
+\paragraph{Models.}
+Decoder-only Llama-style transformers: pre-norm RMSNorm, rotary position embeddings, no biases, tied input and output embeddings, context length 512.
+The small model has $d = 384$, 6 layers and 6 heads (22.9M parameters); the larger has $d = 768$, 12 layers and 12 heads (about 110M).
+Only the MLP activation changes between runs, and every model is within about 1\% of the same parameter count (Appendix~\ref{app:hparams}).
 
 \paragraph{Data.}
-\todo{TinyStories \citep{eldan2023tinystories} or a FineWeb-Edu sample \citep{penedo2024fineweb}}, tokenised with \todo{tokenizer, vocabulary size}.
-Each model trains for \todo{N} tokens with no repeated data, and validation uses a held-out split of \todo{N} tokens.
+TinyStories \citep{eldan2023tinystories}, tokenised with the 32k-token Llama tokenizer.
+The small model trains on 100M tokens and the larger on 300M.
+Training windows are drawn in a shuffled order without replacement, so no token is seen twice.
+This matters: a first pilot on Tiny Shakespeare \citep{karpathy2015charrnn} repeated its data about 16 times, the models memorised it, and the activations that fit fastest looked worst (Appendix~\ref{app:pilot}).
 
 \paragraph{Training.}
-AdamW \citep{loshchilov2019adamw} with $\beta = (0.9, 0.95)$, weight decay 0.1 on weight matrices only (not on norms or the activations' own parameters), gradient clipping at 1.0, linear warmup for \todo{N} steps and cosine decay to 10\% of the peak learning rate.
-For every activation we sweep the peak learning rate over $\{5\times10^{-4},\, 10^{-3},\, 2\times10^{-3}\}$ and report the best, with three seeds at the best setting.
-Batch size \todo{N} tokens.
-Implementation in \todo{MLX \citep{hannun2023mlx} on an Apple M5 laptop and/or JAX on a Kaggle TPU v5e}.
+AdamW \citep{loshchilov2019adamw} with $\beta = (0.9, 0.95)$, weight decay 0.1 on weight matrices only (never on norms or on the activations' own parameters), gradient clipping at 1.0, linear warmup over the first 2\% of steps and cosine decay to 10\% of the peak learning rate.
+Each step sees 16,384 tokens for the small model and 32,768 for the larger, using gradient accumulation.
+For every activation I try peak learning rates of $5\times10^{-4}$, $10^{-3}$ and $2\times10^{-3}$ with seed 0, then run seeds 1 and 2 at the best one.
+Everything runs in MLX \citep{hannun2023mlx} on a 16GB MacBook Air (M5).
+The laptop has no fan and slows down as it heats up, so throughput is compared only between runs started from cold.
 
-\paragraph{Metrics.}
-Best and final validation loss (mean $\pm$ standard deviation over seeds), training throughput in tokens per second measured on the same hardware, the share of hidden units that never activate on a held-out batch, activation sparsity, the largest activation per layer, and the final values of each activation's learned parameters.
+\paragraph{What I measure.}
+Best and final validation loss (mean $\pm$ standard deviation over seeds), training throughput, the share of hidden units that never fire on a held-out batch, the share of exact zeros, the largest activation in each layer, and where each activation's learned parameters end up.
 
 \section{Results}
 \label{sec:results}
@@ -220,12 +217,12 @@ Best and final validation loss (mean $\pm$ standard deviation over seeds), train
 \todo{One paragraph: the headline result in numbers, then what the table and figure show.}
 
 \begin{table}
-  \caption{Best validation loss (mean $\pm$ std over 3 seeds; lower is better). \todo{take-away message}}
+  \caption{Best validation loss, mean $\pm$ std over 3 seeds (lower is better). \todo{one-line takeaway}}
   \label{tab:main}
   \centering
   \begin{tabular}{lcc}
     \toprule
-    Activation & \todo{20M} & \todo{100M} \\
+    Activation & 22.9M & 110M \\
     \midrule
     ReLU & \todo{} & \todo{} \\
     GELU & \todo{} & \todo{} \\
@@ -244,7 +241,7 @@ Best and final validation loss (mean $\pm$ standard deviation over seeds), train
 \begin{figure}
   \centering
   \fbox{\rule[-.5cm]{0cm}{4cm} \rule[-.5cm]{4cm}{0cm}}
-  \caption{Validation loss against training tokens for every activation at \todo{size}. \todo{take-away message}}
+  \caption{Validation loss over training for every activation, small model, seed 0 at its best learning rate. \todo{one-line takeaway}}
   \label{fig:curves}
 \end{figure}
 
@@ -252,13 +249,13 @@ Best and final validation loss (mean $\pm$ standard deviation over seeds), train
 \label{sec:analysis}
 
 \paragraph{Dead units and sparsity.}
-\todo{share of never-active units for ReLU, ReLU$^2$ and Smooth-back ReLU$^2$; activation sparsity for the squared functions.}
+\todo{share of never-active units for ReLU, ReLU$^2$ and Smooth-back ReLU$^2$; share of zeros for the squared functions.}
 
 \paragraph{What the learned parameters do.}
-\todo{does Group Gate's $A$ move away from the identity, and in which layers; where $\tau$ settles per layer in Rank-ReLU$^2$.}
+\todo{does Group Gate's $A$ move away from the identity, and in which layers; where $\tau$ ends up in each layer.}
 
 \paragraph{Ablations.}
-\todo{Group Gate at $g = 2, 8, 32$; Rank-ReLU$^2$ with and without stop-gradient; Smooth-back ReLU$^2$ at $\beta = 1, 2, 4$; Cross-Square against an untied version with separate gate and value matrices.}
+\todo{Group Gate at $g = 2, 8, 32$; Rank-ReLU$^2$ with and without stop-gradient; Smooth-back ReLU$^2$ at $\beta = 1, 1.5, 4$; Cross-Square tied vs untied.}
 
 \paragraph{Cost.}
 \todo{throughput of each activation relative to ReLU.}
@@ -266,25 +263,23 @@ Best and final validation loss (mean $\pm$ standard deviation over seeds), train
 \section{Limitations}
 \label{sec:limitations}
 
-All models are small, at most \todo{100M} parameters, and activation rankings can change with scale \citep{narang2021transfer}.
-We train on one dataset, sweep only the peak learning rate, and use three seeds, so differences below about \todo{two standard deviations} should not be read as real.
-Throughput is measured with straightforward implementations; fused kernels could change the cost comparison, especially for Group Gate and Rank-ReLU$^2$.
+This is a laptop-sized study.
+The largest model has about 110M parameters, and rankings between activations are known to shift with scale and setup \citep{narang2021transfer}.
+There is one dataset, TinyStories, which is simple English and may favour some functions over others.
+Only the peak learning rate is tuned, and three seeds can only separate differences larger than about \todo{two standard deviations}.
+Throughput numbers come from plain MLX code with no fused kernels, which probably understates how cheap Group Gate and Rank-ReLU$^2$ could be.
 
 \section{Conclusion}
 \label{sec:conclusion}
 
-\todo{One paragraph answering the question in the title.}
-
-% \begin{ack}
-% \todo{optional: thanks, compute credits}
-% \end{ack}
+\todo{One paragraph answering the question from the introduction.}
 
 \bibliographystyle{plainnat}
 \bibliography{references}
 
 \appendix
 
-\section{Hyperparameters and parameter counts}
+\section{Parameter counts}
 \label{app:hparams}
 
 \begin{table}[h]
@@ -293,16 +288,44 @@ Throughput is measured with straightforward implementations; fused kernels could
   \centering
   \begin{tabular}{lcc}
     \toprule
-    Activation & \todo{20M} & \todo{100M} \\
+    Activation & small & large \\
     \midrule
-    \todo{fill from the training script} & & \\
+    \todo{fill from the run logs} & & \\
     \bottomrule
   \end{tabular}
 \end{table}
 
+\section{Pilot run}
+\label{app:pilot}
+
+Before the main experiments I ran a quick pilot: a 4.8M-parameter character-level transformer (6 layers, $d = 256$) on Tiny Shakespeare, 2000 steps of 8,192 characters, two seeds per activation.
+It included an early candidate, SiLU plus a learned multiple of its own square, which I later dropped because it belongs to the same family as PolyCom and xIELU.
+
+\begin{table}[h]
+  \caption{Pilot results: best validation loss (nats per character), two seeds. Validation loss started rising after about 1,250 to 1,750 steps in every run.}
+  \label{tab:pilot}
+  \centering
+  \begin{tabular}{lccc}
+    \toprule
+    Activation & Seed 0 & Seed 1 & Mean \\
+    \midrule
+    GELU & 1.497 & 1.505 & 1.501 \\
+    SiLU + $a \cdot$SiLU$^2$ & 1.501 & 1.505 & 1.503 \\
+    ReLU$^2$ & 1.506 & 1.513 & 1.510 \\
+    SiLU + $a \cdot$SiLU$^2$, gated & 1.518 & 1.520 & 1.519 \\
+    SwiGLU & 1.515 & 1.525 & 1.520 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The gated models came last, the reverse of the published ranking.
+The likely reason is that the 1.1M-character dataset was seen about 16 times, so the models were memorising it, and gating mostly speeds up fitting.
+That is why the main experiments use a dataset large enough that nothing repeats.
+One thing from the pilot did look real: in both seeds, the learned weight on the squared term grew with depth, from about 0.02 in the first layer to 0.11 in the last.
+
 \section{Implementation}
 \label{app:code}
 
-Code, tests and run logs: \url{https://github.com/navthings/lilact}. All activations are in \texttt{activations.py}.
+All nine activations are in \texttt{activations.py} at \url{https://github.com/navthings/lilact}, together with the training, sweep and analysis scripts, unit tests that check the worked examples in Section~\ref{sec:method}, and the raw logs of every run.
 
 \end{document}
